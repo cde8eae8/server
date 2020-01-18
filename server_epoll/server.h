@@ -9,6 +9,7 @@
 #include <iostream>
 #include <list>
 #include <mutex>
+#include <atomic>
 #include "epoll.h"
 #include "address.h"
 #include "sys/timerfd.h"
@@ -21,7 +22,6 @@ namespace {
     file_descriptor socket_create() {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 
-        std::cout << "socket created " << fd << std::endl;
         return file_descriptor{fd};
     }
 
@@ -29,17 +29,14 @@ namespace {
         sockaddr_in a;
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = addr.address();
+        std::cout << a.sin_addr.s_addr << std::endl;
         a.sin_port = addr.port();
-        // FIXME sizeof(a)
         int res = ::bind(fd.fd(), reinterpret_cast<sockaddr*>(&a), sizeof(a));
-        std::cout << "socket binded " << a.sin_addr.s_addr << " " << a.sin_port << " " << res << std::endl;
         return res;
     }
 
     int socket_listen(weak_file_descriptor fd) {
-        std::cout << "socket start listen" << std::endl;
         int res = listen(fd.fd(), MAX_CONNECTIONS_QUEUE);
-        std::cout << res << std::endl;
         return res;
     }
 
@@ -48,14 +45,12 @@ namespace {
         socklen_t size = 0;
         int r = accept4(fd.fd(), reinterpret_cast<sockaddr *>(&a), &size, SOCK_NONBLOCK | SOCK_CLOEXEC);
         addr = ipv4_address(a.sin_addr, a.sin_port);
-        std::cout << "socket accepted " << a.sin_addr.s_addr << " " << a.sin_port << "desc=" << r << std::endl;
         return weak_file_descriptor{r};
     }
 
     struct socket_fd {
         socket_fd(ipv4_address addr) {
             descriptor_ = socket_create();
-            std::cout << "socket: " << descriptor_.fd() << std::endl;
             if (!descriptor_.valid()) {
                 throw std::runtime_error(LINE_INFO + "can't create socket");
             }
@@ -67,11 +62,10 @@ namespace {
             if (success < 0) {
                 throw std::runtime_error(LINE_INFO + "can't listen");
             }
-            std::cout << "socket: " << descriptor_.fd() << std::endl;
+            std::cout << "created new socket fd: " << descriptor_.fd() << std::endl;
         }
 
         int fd() {
-            std::cout << "socket fd: " << descriptor_.fd() << std::endl;
             return descriptor_.fd();
         }
 
@@ -99,7 +93,6 @@ struct timeouts {
         }
 
         static void remove(time_list_node_base& base) {
-            std::cout << "remove" << std::endl;
             auto p = base.prev;
             auto n = base.next;
             if (!n || !p) return;
@@ -109,20 +102,15 @@ struct timeouts {
         }
 
         void push(time_list_node_base& base) {
-            std::cout << "push" << std::endl;
             auto* p = head.prev;
             auto* n = &head;
             n->prev = &base;
             p->next = &base;
             base.next = n;
             base.prev = p;
-            print();
         }
 
         void swap(time_list& b) {
-            print();
-            b.print();
-            std::cout << "swap" << std::endl;
             bool empty = head.next == &head;
             bool b_empty = b.head.next == &b.head;
             if (empty && b_empty) return;
@@ -136,25 +124,12 @@ struct timeouts {
                 not_empty->head.prev->next = &emp->head;
                 std::swap(emp->head, not_empty->head);
                 not_empty->clear();
-                print();
-                b.print();
                 return;
             }
 
             std::swap(head.prev->next, b.head.prev->next);
             std::swap(head.next->prev, b.head.next->prev);
             std::swap(head, b.head);
-            print();
-            b.print();
-        }
-
-        void print() {
-            std::cout << "print" << std::endl;
-            time_list::time_list_node_base* it = head.next;
-            for ( ; it != &head && it; it = it->next) {
-                std::cout << it->prev << "(" << it << ")" << it->next << " ::: ";
-            }
-            std::cout << std::endl;
         }
 
         time_list_node_base head;
@@ -167,7 +142,6 @@ struct timeouts {
 
     friend server_socket;
     void check();
-
 
     time_list cur, prev;
     std::mutex m;
@@ -182,7 +156,6 @@ struct server_socket : public timeouts::time_list::time_list_node_base {
 
     void close();
 
-    server_socket(epoll_event_handler *h, server* s);
 
     void set_on_read(epoll_event_handler::on_read_t callback) {
         if (callback) {
@@ -206,33 +179,43 @@ struct server_socket : public timeouts::time_list::time_list_node_base {
         on_close_ = callback;
     }
 
-    void on_close(weak_file_descriptor fd) {
-        std::cout << __FUNCTION__ << std::endl;
-        on_close_();
-        ::close(fd.fd());
-    }
+    void on_close(weak_file_descriptor fd);
 
     void on_read(reader r) {
+        if (closed) return;
         update_timeout();
         on_read_(r);
     }
 
     void on_write(writer w) {
+        if (closed) return;
         update_timeout();
         on_write_(w);
     }
 
 private:
+    server_socket(epoll_handler_builder &h, server* s);
+
+    friend server;
+    friend std::list<server_socket>;
+
+    void set_iterator(std::list<server_socket *>::iterator it) {
+        it_ = it;
+    }
 
     void update_timeout();
 
+    std::atomic<bool> closed = false;
     epoll_event_handler *h_;
     server *s_;
     on_read_t on_read_;
     on_write_t on_write_;
     on_close_t on_close_;
+    std::list<server_socket*>::iterator it_;
 };
 
+
+weak_file_descriptor create_timerfd(size_t period);
 
 struct server {
     using on_new_connection_t = std::function<void(server_socket*)>;
@@ -241,30 +224,23 @@ struct server {
     server(server&) = delete;
     server operator=(server&) = delete;
 
-    server(ipv4_address addr) : epoll_(), s_(addr), h(epoll_.create_handler(s_.fd())) {
-        h->set_on_read([this] (epoll_event_handler::reader) {
-            this->on_new_connection();
-        });
-        epoll_.register_descriptor(h);
-        weak_file_descriptor t(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
-        if (!t.valid()) {
-            throw std::runtime_error(LINE_INFO + "can't create timer");
-        }
-        std::cout << "timer " << t.fd() << std::endl;
-        timer = epoll_.create_handler(t);
-        timer->set_on_read([this] (epoll_event_handler::reader r) {
-            uint64_t value;
-            r.read(reinterpret_cast<char*>(&value), 8);
+    server(ipv4_address addr) : epoll_(), s_(addr) {
+        h = epoll_.new_handler(s_.fd()).set_on_read(
+            [this] (epoll_event_handler::reader) {
+                this->on_new_connection();
+            }).register_handler();
+        auto t = create_timerfd(5);
+        timer = epoll_.new_handler(t).set_on_read(
+            [this] (epoll_event_handler::reader r) {
+                uint64_t value;
+                r.read(reinterpret_cast<char*>(&value), 8);
 
-            this->timeouts_checker.check();
-        });
-        itimerspec spec = {0, 0, 0, 0};
-        spec.it_interval.tv_sec = 2;
-        spec.it_interval.tv_nsec = 0;
-        spec.it_value.tv_sec = 2;
-        spec.it_value.tv_nsec = 0;
-        timerfd_settime(t.fd(), 0, &spec, NULL);
-        epoll_.register_descriptor(timer);
+                this->timeouts_checker.check();
+            }).set_on_close(
+                [] (weak_file_descriptor f) {
+                    ::close(f.fd());
+                }
+            ).register_handler();
     }
 
     void run() {
@@ -275,7 +251,15 @@ struct server {
         new_connection_callback = handler;
     }
 
+    void finish() volatile {
+        epoll_.request_finishing(); // = true;
+    }
+
 private:
+    void remove(std::list<server_socket*>::iterator it) {
+        connections.erase(it);
+    }
+
     void on_new_connection() {
         std::cout << "real new connection" << std::endl;
         ipv4_address to(0, 0);
@@ -284,21 +268,28 @@ private:
         if (!fd.valid()) {
             throw std::runtime_error(LINE_INFO + "can't accept");
         }
-        auto h = epoll_.create_handler(fd.fd());
-        epoll_.register_descriptor(h);
+        auto h = epoll_.new_handler(fd.fd());
+        auto c = new server_socket(h, this);
+        connections.push_front(c);
+        c->set_iterator(connections.begin());
+
         if (new_connection_callback)
-            new_connection_callback(&connections.emplace_back(h, this));
+            new_connection_callback(c);
+        h.register_handler();
+//        c->set_handler(handler);
     }
 
     friend server_socket;
 
-    std::list<server_socket> connections;
+    std::list<server_socket*> connections;
     on_new_connection_t new_connection_callback;
     epoll epoll_;
     socket_fd s_;
     epoll_event_handler *h, *timer;
 
     timeouts timeouts_checker;
+    bool finish_ = false;
 };
+
 
 #endif //SERVER_SERVER_H

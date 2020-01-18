@@ -7,6 +7,8 @@
 #include <string>
 #include <cstring>
 
+#define PORT 50001
+
 #define LINE_INFO (std::string(strerror(errno)) + "|" + std::string(__FILE__) + ":" + std::to_string(__LINE__) + ":")
 
 #endif //SERVER_DEBUG_H

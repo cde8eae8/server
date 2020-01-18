@@ -9,32 +9,43 @@
 #include <functional>
 #include "taskqueue.h"
 
+
+
 template <typename TaskType>
 class worker {
 public:
     using process_t = std::function<void(TaskType)>;
+    struct args {
+        worker& w;
+    };
 
     worker(process_t process) noexcept :
             process_(process),
             this_queue(),
-            finished_(false),
-            t(std::bind(&worker::run, this)) {}
-
-    void run() {
-        while (!finished()) {
-            TaskType task;
-            pop_task(task);
-
-            if (finished()) break;
-
-            process_(task);
-        }
+            finished_(false) {
+        pthread_create(&t, NULL, run, this);
     }
 
-    // may be called multiple times
-    void finish() {
-        finished_ = true;
-        this_queue.finish();
+    static void* run(void* w_) {
+        static sigset_t mask;
+
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGUSR1);
+
+        if (pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0) {
+            perror("pthread_sigmask");
+            exit(1);
+        }
+
+        std::cout << "task started" << std::endl;
+        worker* w = static_cast<worker*>(w_);
+        while (!w->finished()) {
+            TaskType task;
+            w->pop_task(task);
+            if (w->finished()) break;
+            w->process_(task);
+        }
+        return nullptr;
     }
 
     template<typename It>
@@ -53,8 +64,11 @@ public:
     }
 
     ~worker() {
-        finish();
-        t.join();
+        finished_ = true;
+        this_queue.finish();
+        pthread_kill(t, SIGUSR1);
+        std::cout << "join" << std::endl;
+        pthread_join(t, NULL);
     }
 
 protected:
@@ -65,7 +79,8 @@ protected:
 
 private:
     process_t process_;
-    std::thread t;
+//    std::thread t;
+    pthread_t t;
     TaskQueue<TaskType> this_queue;
     std::atomic<bool> finished_;
 };
