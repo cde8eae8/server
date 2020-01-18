@@ -31,7 +31,6 @@ int main() {
         auto worker_process = std::bind(&getaddrinfo_worker,
                                         std::placeholders::_1,
                                         [&c](std::string s) {
-                                            std::cout << "msg: " << s << std::endl;
                                             c.write(s.data(), s.size());
                                         });
 
@@ -40,7 +39,6 @@ int main() {
         auto w_it = workers.begin();
 
         c.set_on_new_message([&w] (std::string v) {
-            std::cout << std::string(v.begin(), v.end()) << std::endl;
             w.add_task(v);
         });
 

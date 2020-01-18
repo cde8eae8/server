@@ -62,10 +62,6 @@ private:
             it = std::find(beg, end, '\n');
             if (it != end) {
                 msg.insert(msg.end(), beg, it - 1);
-                for (char c : msg) {
-                    std::cout << static_cast<int>(c) << std::endl;
-                }
-                std::cout << "message " << msg << ") " << std::endl;
 
                 on_new_message(std::move(msg));
                 msg.clear();
